@@ -1,0 +1,203 @@
+name: 🔒 Security & Dependency Management
+
+on:
+  schedule:
+    # Run security checks daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'backend/package.json'
+      - 'backend/package-lock.json'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'backend/package.json'
+      - 'backend/package-lock.json'
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  # Dependency Vulnerability Scan
+  dependency-scan:
+    name: 🔍 Dependency Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: 🔍 Install dependencies
+        run: npm ci
+
+      - name: 🔒 Run npm audit
+        run: npm audit --audit-level=moderate --json > audit-report.json || true
+
+      - name: 📊 Upload audit report
+        uses: actions/upload-artifact@v3
+        with:
+          name: npm-audit-report
+          path: ./backend/audit-report.json
+          retention-days: 30
+
+      - name: 🔍 Run Snyk security scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high --json-file-output=snyk-report.json
+        continue-on-error: true
+
+      - name: 📊 Upload Snyk report
+        uses: actions/upload-artifact@v3
+        with:
+          name: snyk-security-report
+          path: ./backend/snyk-report.json
+          retention-days: 30
+
+  # Dependency Updates
+  dependency-updates:
+    name: 🔄 Check for Dependency Updates
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: 🔍 Install dependencies
+        run: npm ci
+
+      - name: 🔄 Check for outdated packages
+        run: npm outdated --json > outdated-report.json || echo "{}" > outdated-report.json
+
+      - name: 📊 Upload outdated report
+        uses: actions/upload-artifact@v3
+        with:
+          name: outdated-dependencies
+          path: ./backend/outdated-report.json
+          retention-days: 7
+
+      - name: 🔄 Create Dependabot PR
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: update dependencies'
+          title: '🔄 Update Dependencies'
+          body: |
+            ## 🔄 Dependency Updates
+            
+            This PR updates outdated dependencies to their latest versions.
+            
+            ### Changes:
+            - Updated dependencies based on security recommendations
+            - Improved package security
+            
+            ### Testing:
+            - [ ] All tests pass
+            - [ ] Security scan passes
+            - [ ] Application builds successfully
+            
+            ### Notes:
+            Please review the changes and test thoroughly before merging.
+          branch: dependabot/update-dependencies
+          delete-branch: true
+        if: github.event_name == 'schedule'
+
+  # Code Security Analysis
+  code-security:
+    name: 🔍 Code Security Analysis
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v4
+
+      - name: 📦 Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: 🔍 Install dependencies
+        run: npm ci
+
+      - name: 🔍 Run ESLint security rules
+        run: |
+          npm install -g eslint-plugin-security
+          npx eslint . --ext .js --config .eslintrc.json --format json > eslint-security-report.json || echo "{}" > eslint-security-report.json
+        continue-on-error: true
+
+      - name: 📊 Upload ESLint security report
+        uses: actions/upload-artifact@v3
+        with:
+          name: eslint-security-report
+          path: ./backend/eslint-security-report.json
+          retention-days: 30
+
+      - name: 🔍 Run Bandit security scan
+        uses: python-security/bandit@main
+        with:
+          path: ./backend
+          level: low
+          format: json
+          output-file: bandit-report.json
+        continue-on-error: true
+
+      - name: 📊 Upload Bandit report
+        uses: actions/upload-artifact@v3
+        with:
+          name: bandit-security-report
+          path: ./backend/bandit-report.json
+          retention-days: 30
+
+  # Security Notifications
+  security-notifications:
+    name: 📧 Security Notifications
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, dependency-updates, code-security]
+    if: always()
+
+    steps:
+      - name: 📥 Download security reports
+        uses: actions/download-artifact@v3
+        with:
+          path: ./security-reports
+
+      - name: 📧 Send security summary
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          channel: '#security'
+          text: |
+            🔒 Security Scan Summary
+            
+            **Dependency Scan**: ${{ needs.dependency-scan.result }}
+            **Dependency Updates**: ${{ needs.dependency-updates.result }}
+            **Code Security**: ${{ needs.code-security.result }}
+            
+            Check the GitHub Actions logs for detailed reports.
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        if: always() 
